@@ -2,7 +2,7 @@
 # 下载 pdfium 动态库用于 PDF 渲染与文本提取
 #
 # 使用方法: ./scripts/download-pdfium.sh [platform]
-# platform: macos-x64, macos-arm64, windows-x64, linux-x64,
+# platform: macos-x64, macos-arm64, windows-x64, linux-x64, linux-arm64,
 #           android-arm64, android-arm, android-x64, android-x86,
 #           all, all-desktop, all-android (默认: 当前平台)
 
@@ -36,7 +36,10 @@ detect_platform() {
             fi
             ;;
         Linux)
-            echo "linux-x64"
+            case "$arch" in
+                aarch64|arm64) echo "linux-arm64" ;;
+                *) echo "linux-x64" ;;
+            esac
             ;;
         MINGW*|MSYS*|CYGWIN*)
             echo "windows-x64"
@@ -77,6 +80,12 @@ download_pdfium() {
         linux-x64)
             url="${PDFIUM_BASE_URL}/pdfium-linux-x64.tgz"
             archive_name="pdfium-linux-x64.tgz"
+            lib_name="libpdfium.so"
+            extract_path="lib/libpdfium.so"
+            ;;
+        linux-arm64)
+            url="${PDFIUM_BASE_URL}/pdfium-linux-arm64.tgz"
+            archive_name="pdfium-linux-arm64.tgz"
             lib_name="libpdfium.so"
             extract_path="lib/libpdfium.so"
             ;;
@@ -180,7 +189,7 @@ main() {
         download_pdfium "android-x64"
         download_pdfium "android-x86"
     elif [[ "$platform" == "unknown" ]]; then
-        log_error "无法检测当前平台，请手动指定: macos-x64, macos-arm64, windows-x64, linux-x64, android-arm64, android-arm, android-x64, android-x86"
+        log_error "无法检测当前平台，请手动指定: macos-x64, macos-arm64, windows-x64, linux-x64, linux-arm64, android-arm64, android-arm, android-x64, android-x86"
         exit 1
     else
         download_pdfium "$platform"
