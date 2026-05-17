@@ -181,11 +181,18 @@ struct ChatAnkiControlArgs {
     task_id: Option<String>,
 }
 
+/// Default export format when the caller omits `format`.
+/// Anki export defaults to APKG (the common case); JSON must be requested explicitly.
+fn default_export_format() -> String {
+    "apkg".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatAnkiExportArgs {
     #[serde(alias = "documentId")]
     document_id: String,
+    #[serde(default = "default_export_format")]
     format: String,
     deck_name: Option<String>,
     note_type: Option<String>,

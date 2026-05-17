@@ -107,7 +107,7 @@ fn build_fields_with_model_names(
         normalized_extra.insert(normalize_key(key), value.clone());
     }
 
-    model_field_names
+    let mut result: HashMap<String, String> = model_field_names
         .iter()
         .map(|field_name| {
             let lower = field_name.to_lowercase();
@@ -150,7 +150,56 @@ fn build_fields_with_model_names(
 
             (field_name.clone(), value)
         })
-        .collect()
+        .collect();
+
+    // Fallback for localized Anki note types: the mapping above only fills
+    // Front/Back when the model field is literally named "front"/"back".
+    // A non-English note type (e.g. a Chinese "Basic" whose fields are
+    // 正面/背面) matches nothing, leaving every field empty — AnkiConnect
+    // then rejects the note with "cannot create note because it is empty".
+    // When that happens, assign the card's content to the model's fields
+    // positionally so the note is never empty and no content is dropped.
+    if result.values().all(|v| v.trim().is_empty()) {
+        let mut candidates: Vec<String> = Vec::new();
+        candidates.push(card.front.clone());
+        candidates.push(card.back.clone());
+        if let Some(text) = &card.text {
+            candidates.push(text.clone());
+        }
+        let mut extra_keys: Vec<&String> = card.extra_fields.keys().collect();
+        extra_keys.sort();
+        for key in extra_keys {
+            if matches!(key.to_lowercase().as_str(), "front" | "back" | "text" | "tags") {
+                continue;
+            }
+            if let Some(value) = card.extra_fields.get(key) {
+                candidates.push(value.clone());
+            }
+        }
+        let mut pieces: Vec<String> = Vec::new();
+        for candidate in candidates {
+            let trimmed = candidate.trim();
+            if !trimmed.is_empty() && !pieces.iter().any(|existing| existing == trimmed) {
+                pieces.push(trimmed.to_string());
+            }
+        }
+        if !pieces.is_empty() {
+            let field_count = model_field_names.len();
+            for (index, field_name) in model_field_names.iter().enumerate() {
+                let value = if index + 1 == field_count {
+                    pieces
+                        .get(index..)
+                        .map(|rest| rest.join("\n\n"))
+                        .unwrap_or_default()
+                } else {
+                    pieces.get(index).cloned().unwrap_or_default()
+                };
+                result.insert(field_name.clone(), value);
+            }
+        }
+    }
+
+    result
 }
 
 /// 检查AnkiConnect是否可用
