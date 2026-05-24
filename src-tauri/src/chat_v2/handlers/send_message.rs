@@ -1899,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_original_skill_snapshot_overrides_restores_skill_ids_and_allowlist() {
+    fn test_apply_original_skill_snapshot_overrides_restores_skill_ids() {
         let options = SendOptions {
             replay_mode: Some(ReplayMode::Original),
             ..Default::default()
@@ -1927,10 +1927,6 @@ mod tests {
                 "mode-a".to_string(),
             ]
         );
-        assert_eq!(
-            updated.skill_allowed_tools.unwrap(),
-            vec!["builtin-web_search".to_string(), "mcp_fetch".to_string()]
-        );
     }
 
     #[test]
@@ -1942,7 +1938,6 @@ mod tests {
         let meta = MessageMeta {
             skill_runtime_after: Some(crate::chat_v2::types::ReplaySkillPayloadSnapshot {
                 active_skill_ids: vec!["runtime-skill".to_string()],
-                skill_allowed_tools: vec!["server-a::fetch".to_string()],
                 skill_contents: std::collections::HashMap::new(),
                 skill_embedded_tools: std::collections::HashMap::new(),
                 mcp_tool_schemas: vec![crate::chat_v2::types::McpToolSchema {
@@ -1960,10 +1955,6 @@ mod tests {
         assert_eq!(
             updated.active_skill_ids.unwrap(),
             vec!["runtime-skill".to_string()]
-        );
-        assert_eq!(
-            updated.skill_allowed_tools.unwrap(),
-            vec!["server-a::fetch".to_string()]
         );
         assert_eq!(updated.mcp_tools.unwrap(), vec!["server-a".to_string()]);
         assert_eq!(

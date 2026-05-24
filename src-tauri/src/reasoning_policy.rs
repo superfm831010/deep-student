@@ -187,6 +187,13 @@ pub fn get_passback_policy(config: &ApiConfig) -> ReasoningPassbackPolicy {
         }
     }
 
+    // Perplexity Sonar Reasoning：使用 reasoning_content（DeepSeekStyle）
+    // Perplexity 无专用适配器（走通用 OpenAI 适配器），故在此按模型名识别其推理模型，
+    // 否则非 is_reasoning 配置会被通用适配器判为 NoPassback。
+    if model.contains("sonar") && model.contains("reasoning") {
+        return ReasoningPassbackPolicy::DeepSeekStyle;
+    }
+
     // 委托给适配器系统
     let adapter = get_adapter(
         config.provider_type.as_deref(),

@@ -430,6 +430,7 @@
     "api_config": "Model Service",
     "models": "Model Assignment",
     "model_assignment": "Model Assignment",
+    "anki": "Anki Sync",
     "features": "Feature Toggles",
     "rag": "RAG Settings",
     "subjects": "Subject Configuration",

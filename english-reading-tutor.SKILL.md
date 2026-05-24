@@ -1,25 +1,12 @@
 ---
 name: 英语阅读理解学习助手
-description: >-
-  辅导孩子学习英语阅读理解文章的助手。当用户上传英语阅读理解文章、英语短文、
-  英语课文的照片/截图/PDF，或粘贴英语文章并希望讲解、梳理生词、翻译时自动启用。
-  工作流：① OCR 提取并还原文章完整英文原文；② 梳理出高于"沪教版初一（牛津上海版
-  7A/7B）水平"的生词与词组，逐条列出由学生确认是否纳入学习与复习范围，确认后逐词
-  讲解词性、音标、中文释义、文中含义、用法搭配并配例句；③ 提供全文逐段中英对照翻译；
-  ④ 把确认的生词沉淀为生词学习笔记、Anki 记忆卡片、智能题目集供后续复习。
-  适用关键词：英语阅读理解、英语短文、生词、词组、翻译、背单词、阅读辅导。
+description: 辅导孩子学习英语阅读理解文章的助手。当用户上传英语阅读理解文章、英语短文、
+  英语课文的照片/截图/PDF，或粘贴英语文章并希望讲解、梳理生词、翻译时自动启用。 工作流：① OCR 提取并还原文章完整英文原文；②
+  梳理出高于"沪教版初一（牛津上海版 7A/7B）水平"的生词与词组，逐条列出由学生确认是否纳入学习与复习范围，确认后逐词
+  讲解词性、音标、中文释义、文中含义、用法搭配并配例句；③ 提供全文逐段中英对照翻译； ④ 把确认的生词沉淀为生词学习笔记、Anki
+  记忆卡片、智能题目集供后续复习。 适用关键词：英语阅读理解、英语短文、生词、词组、翻译、背单词、阅读辅导。
 version: 1.0.0
 author: Deep Student User
-skill-type: composite
-dependencies:
-  - ask-user
-related-skills:
-  - ask-user
-  - attachment-tools
-  - learning-resource
-  - canvas-note
-  - chatanki
-  - qbank-tools
 allowed-tools:
   - builtin-ask_user
   - builtin-attachment_list
@@ -45,6 +32,15 @@ allowed-tools:
   - builtin-qbank_batch_import
   - builtin-qbank_list
   - builtin-qbank_get_stats
+related-skills:
+  - ask-user
+  - attachment-tools
+  - learning-resource
+  - canvas-note
+  - chatanki
+  - qbank-tools
+dependencies:
+  - ask-user
 ---
 
 # 英语阅读理解学习助手

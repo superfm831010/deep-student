@@ -165,24 +165,27 @@ pub async fn add_cards_to_anki_connect(
     if all_cloze {
         println!("检测到填空题，开始验证笔记类型...");
 
-        // 检查Anki中是否存在名为"Cloze"的笔记类型
         let model_names = crate::anki_connect_service::get_model_names()
             .await
             .map_err(|e| AppError::validation(format!("获取Anki笔记类型失败: {}", e)))?;
 
-        if !model_names.iter().any(|name| name == "Cloze") {
-            return Err(AppError::validation(
-                "Anki中缺少标准的'Cloze'笔记类型，请在Anki中手动添加一个。".to_string(),
-            ));
-        }
-
-        // 如果用户选择的不是"Cloze"，但又是填空题，则强制使用"Cloze"
-        if note_type != "Cloze" {
-            println!(
-                "用户选择了非标准的填空题笔记类型 '{}'，将强制使用 'Cloze'。",
-                note_type
-            );
-            note_type = "Cloze".to_string();
+        // 本地化 Anki 的 Cloze 笔记类型可能叫「填空题」等；识别任一 cloze 类模型。
+        let cloze_model = model_names
+            .iter()
+            .find(|name| {
+                let l = name.to_lowercase();
+                l.contains("cloze") || name.contains("填空")
+            })
+            .cloned();
+        match cloze_model {
+            Some(name) => {
+                note_type = name;
+            }
+            None => {
+                return Err(AppError::validation(
+                    "Anki中缺少 Cloze/填空 类笔记类型，请在 Anki 中手动添加一个。".to_string(),
+                ));
+            }
         }
     }
 
@@ -198,26 +201,18 @@ pub async fn add_cards_to_anki_connect(
         println!("创建牌组失败（可能已存在）: {}", e);
     }
 
-    let mut card_models: HashMap<String, String> = HashMap::new();
-    for card in &selected_cards {
-        let Some(template_id) = card
-            .template_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        if card.id.trim().is_empty() {
-            continue;
-        }
-        if let Ok(Some(template)) = state.database.get_custom_template_by_id(template_id) {
-            let model_name = template.note_type.trim();
-            if !model_name.is_empty() {
-                card_models.insert(card.id.clone(), model_name.to_string());
-            }
-        }
-    }
+    // 解析目标 note type，并（设置默认开启时）推送带样式的 DeepStudent 模型。
+    // explicit_template_id/requested 留空：本命令不带模板参数，由卡片自身 template_id
+    // 或设置里的默认模板决定。note_type_explicit=false：前端默认 note_type 不视为显式覆盖。
+    let card_models = crate::anki_connect_service::resolve_card_models_with_styling(
+        &state.database,
+        &selected_cards,
+        None,
+        &[],
+        false,
+        all_cloze,
+    )
+    .await;
 
     match crate::anki_connect_service::add_notes_to_anki_with_card_models(
         selected_cards,

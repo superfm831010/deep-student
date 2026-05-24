@@ -786,6 +786,7 @@ impl LLMManager {
 
         // 🆕 应用推理配置，优先使用传入的enable_thinking参数
         Self::apply_reasoning_config(&mut request_body, &config, Some(enable_thinking));
+        // 注：DeepSeek reasoning_content 的补齐在下方 messages 最终落入 request_body 之后进行
 
         // 检查是否启用工具（全局 + 模型能力）
         let mut tools_enabled = self
@@ -1056,6 +1057,11 @@ impl LLMManager {
 
         // 注入阶段可能修改 messages，此处确保请求体携带最新副本
         request_body["messages"] = serde_json::Value::Array(messages.clone());
+
+        // 🔧 DeepSeek V4 thinking 模式：必须在 messages 最终落入 request_body 之后补齐
+        // reasoning_content（空串兜底），否则上面的 messages 覆盖会冲掉早先的注入，
+        // 导致工具调用轮报 HTTP 400「reasoning_content ... must be passed back」
+        Self::ensure_deepseek_reasoning_content(&mut request_body, &config);
 
         // 计算请求体大小
         request_bytes = serde_json::to_string(&request_body)
@@ -2404,6 +2410,7 @@ impl LLMManager {
         });
 
         Self::apply_reasoning_config(&mut request_body, &config, None);
+        // 注：DeepSeek reasoning_content 的补齐在下方 messages 最终落入 request_body 之后进行
 
         // 检查是否启用工具（全局 + 模型能力）
         let tools_enabled = self
@@ -2537,6 +2544,10 @@ impl LLMManager {
 
         // 降级注入可能调整 messages，确保请求体使用最新消息集合
         request_body["messages"] = serde_json::Value::Array(messages.clone());
+
+        // 🔧 DeepSeek V4 thinking 模式：在 messages 最终落入 request_body 之后补齐
+        // reasoning_content（空串兜底），避免被上面的覆盖冲掉
+        Self::ensure_deepseek_reasoning_content(&mut request_body, &config);
 
         // 根据模型适配器添加特定参数（应用供应商级别的 max_tokens 限制）
         let max_tokens = effective_max_tokens(config.max_output_tokens, config.max_tokens_limit);
@@ -3399,6 +3410,10 @@ impl LLMManager {
         });
 
         Self::apply_reasoning_config(&mut request_body, &config, None);
+
+        // 🔧 DeepSeek V4 thinking 模式：保证每条 assistant 消息都带 reasoning_content（空串兜底），
+        // 否则多轮/工具调用场景报 HTTP 400「reasoning_content ... must be passed back」
+        Self::ensure_deepseek_reasoning_content(&mut request_body, &config);
 
         // 根据模型适配器类型设置不同的参数
         if cfg!(debug_assertions) {
@@ -4268,6 +4283,9 @@ impl LLMManager {
 
         Self::apply_reasoning_config(&mut request_body, &config, None);
 
+        // 🔧 DeepSeek V4 thinking 模式：补齐 assistant 消息的 reasoning_content（空串兜底）
+        Self::ensure_deepseek_reasoning_content(&mut request_body, &config);
+
         // 如果是 OpenAI GPT 模型，启用 JSON strict 模式
         if config.model.starts_with("gpt-") {
             request_body["response_format"] = json!({"type": "json_object"});
@@ -4844,6 +4862,9 @@ impl LLMManager {
         });
 
         Self::apply_reasoning_config(&mut request_body, &config, None);
+
+        // 🔧 DeepSeek V4 thinking 模式：补齐 assistant 消息的 reasoning_content（空串兜底）
+        Self::ensure_deepseek_reasoning_content(&mut request_body, &config);
 
         // 如果支持JSON模式，添加response_format
         if config.model.starts_with("gpt-") {

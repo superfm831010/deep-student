@@ -18,7 +18,7 @@
 //!
 //! 参考文档：https://ai.google.dev/gemini-api/docs/thinking
 
-use super::{get_trimmed_effort, resolve_enable_thinking, RequestAdapter};
+use super::{get_trimmed_effort, resolve_enable_thinking, PassbackPolicy, RequestAdapter};
 use crate::llm_manager::ApiConfig;
 use serde_json::{json, Map, Value};
 
@@ -162,6 +162,24 @@ impl RequestAdapter for GeminiAdapter {
     fn should_remove_sampling_params(&self, _config: &ApiConfig) -> bool {
         // Gemini 支持采样参数
         false
+    }
+
+    /// 思维链回传策略
+    ///
+    /// Gemini（直连 Google API）使用 `reasoning_details` 数组格式回传思维链，
+    /// Gemini 3 在工具调用场景下还需回传 `thoughtSignature`。
+    /// 注意：默认实现仅按 `is_reasoning` 标志返回 `DeepSeekStyle`，对 Gemini 是错误格式，
+    /// 因此这里按模型族覆写为 `ReasoningDetails`。
+    fn get_passback_policy(&self, config: &ApiConfig) -> PassbackPolicy {
+        let model = config.model.to_lowercase();
+        if model.contains("gemini-2.5") || Self::is_gemini_3(&config.model) {
+            PassbackPolicy::ReasoningDetails
+        } else if config.supports_reasoning || config.is_reasoning {
+            // 其他/旧版 Gemini：保持通用推理回传
+            PassbackPolicy::DeepSeekStyle
+        } else {
+            PassbackPolicy::NoPassback
+        }
     }
 }
 

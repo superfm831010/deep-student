@@ -7,6 +7,8 @@ import { Input } from '../ui/shad/Input';
 import { ankiConnectClient, AnkiConnectSettings } from '../../services/ankiConnectClient';
 import { showGlobalNotification } from '../UnifiedNotification';
 import { getErrorMessage } from '../../utils/errorUtils';
+import { invoke } from '@tauri-apps/api/core';
+import type { CustomAnkiTemplate } from '@/types';
 
 interface AnkiConnectSettingsSectionProps {
   compact?: boolean;
@@ -16,12 +18,24 @@ export const AnkiConnectSettingsSection: React.FC<AnkiConnectSettingsSectionProp
   const { t } = useTranslation(['common']);
   const [settings, setSettings] = useState<AnkiConnectSettings | null>(null);
   const [testing, setTesting] = useState(false);
+  const [templates, setTemplates] = useState<CustomAnkiTemplate[]>([]);
   // No deck/model selectors here; only export deck name
 
   useEffect(() => {
     (async () => {
       const s = await ankiConnectClient.loadSettings();
       setSettings(s);
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const list = await invoke<CustomAnkiTemplate[]>('get_all_custom_templates');
+        setTemplates(Array.isArray(list) ? list.filter((tpl) => tpl.is_active !== false) : []);
+      } catch {
+        // 模板加载失败时下拉为空，不影响其它设置
+      }
     })();
   }, []);
 
@@ -145,6 +159,33 @@ export const AnkiConnectSettingsSection: React.FC<AnkiConnectSettingsSectionProp
               onChange={(e) => savePartial({ anki_connect_export_deck: e.target.value })}
             />
             <div className="mt-1 text-xs text-muted-foreground">{t('common:anki.settings.export_deck_hint')}</div>
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <div className="font-medium">{t('common:anki.settings.push_styled_label')}</div>
+              <div className="text-xs text-muted-foreground">{t('common:anki.settings.push_styled_desc')}</div>
+            </div>
+            <Switch
+              checked={settings.anki_connect_push_styled_models !== false}
+              onCheckedChange={(v) => savePartial({ anki_connect_push_styled_models: v })}
+            />
+          </div>
+
+          <div className="p-3 rounded-lg border">
+            <div className="font-medium mb-2">{t('common:anki.settings.default_template_label')}</div>
+            <select
+              className="w-full h-9 px-2 rounded-md border bg-background text-sm disabled:opacity-50"
+              value={settings.anki_connect_default_template_id || ''}
+              disabled={settings.anki_connect_push_styled_models === false}
+              onChange={(e) => savePartial({ anki_connect_default_template_id: e.target.value })}
+            >
+              <option value="">—</option>
+              {templates.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
+              ))}
+            </select>
+            <div className="mt-1 text-xs text-muted-foreground">{t('common:anki.settings.default_template_hint')}</div>
           </div>
 
           <div className="col-span-1 md:col-span-2">

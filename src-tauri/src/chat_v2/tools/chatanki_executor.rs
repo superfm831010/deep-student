@@ -131,6 +131,7 @@ struct ChatAnkiRunArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatAnkiStartArgs {
+    #[serde(default)]
     goal: String,
     content: String,
     #[serde(alias = "templateId")]
@@ -1208,6 +1209,10 @@ impl ChatAnkiToolExecutor {
             }
         }
 
+        // 读取用户设置的默认模板 ID（模板管理里设的"默认风格"）。
+        // 用于在返回里标注 isDefault / defaultTemplateId，引导模型在未指定风格时优先使用默认模板。
+        let default_template_id = resolve_user_default_template_id(db);
+
         let mut out: Vec<Value> = Vec::new();
         for t in templates {
             if active_only && !t.is_active {
@@ -1227,6 +1232,10 @@ impl ChatAnkiToolExecutor {
             } else {
                 t.description.clone()
             };
+            let is_default = default_template_id
+                .as_deref()
+                .map(|d| d == t.id)
+                .unwrap_or(false);
             out.push(json!({
                 "id": t.id,
                 "name": t.name,
@@ -1235,6 +1244,7 @@ impl ChatAnkiToolExecutor {
                 "noteType": t.note_type,
                 "fields": fields,
                 "isActive": t.is_active,
+                "isDefault": is_default,
                 "complexityLevel": complexity_level,
                 "useCaseDescription": use_case,
                 "field_extraction_rules": rules,
@@ -1253,6 +1263,7 @@ impl ChatAnkiToolExecutor {
             "activeOnly": active_only,
             "query": query_value,
             "count": out.len(),
+            "defaultTemplateId": default_template_id,
             "templates": out,
         });
 
@@ -1678,22 +1689,32 @@ impl ChatAnkiToolExecutor {
             let model_names = crate::anki_connect_service::get_model_names()
                 .await
                 .map_err(|e| e.to_string())?;
-            if !model_names.iter().any(|name| name == "Cloze") {
-                let error_key = "blocks.ankiCards.errors.missingClozeNoteType".to_string();
-                ctx.emit_tool_call_error(&error_key);
-                let result = ToolResultInfo::failure(
-                    Some(call.id.clone()),
-                    Some(ctx.block_id.clone()),
-                    call.name.clone(),
-                    call.arguments.clone(),
-                    error_key,
-                    start_time.elapsed().as_millis() as u64,
-                );
-                let _ = ctx.save_tool_block(&result);
-                return Ok(result);
-            }
-            if note_type != "Cloze" {
-                note_type = "Cloze".to_string();
+            // 本地化 Anki 的 Cloze 笔记类型可能叫「填空题」等；识别任一 cloze 类模型。
+            let cloze_model = model_names
+                .iter()
+                .find(|name| {
+                    let l = name.to_lowercase();
+                    l.contains("cloze") || name.contains("填空")
+                })
+                .cloned();
+            match cloze_model {
+                Some(name) => {
+                    note_type = name;
+                }
+                None => {
+                    let error_key = "blocks.ankiCards.errors.missingClozeNoteType".to_string();
+                    ctx.emit_tool_call_error(&error_key);
+                    let result = ToolResultInfo::failure(
+                        Some(call.id.clone()),
+                        Some(ctx.block_id.clone()),
+                        call.name.clone(),
+                        call.arguments.clone(),
+                        error_key,
+                        start_time.elapsed().as_millis() as u64,
+                    );
+                    let _ = ctx.save_tool_block(&result);
+                    return Ok(result);
+                }
             }
         }
 
@@ -1710,45 +1731,17 @@ impl ChatAnkiToolExecutor {
             collect_requested_template_ids(explicit_template_id.clone(), args.template_ids.clone());
         let inferred_single_template_id = infer_single_template_id_from_cards(&cards);
         let fallback_template_id = explicit_template_id.or(inferred_single_template_id);
-        let mut card_note_types: HashMap<String, String> = HashMap::new();
-
-        if !note_type_explicit && !all_cloze {
-            let mut template_note_type_cache: HashMap<String, Option<String>> = HashMap::new();
-            for card in &cards {
-                let card_template_id = card
-                    .template_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .or_else(|| fallback_template_id.clone())
-                    .or_else(|| requested_template_ids.first().cloned());
-                if let Some(template_id) = card_template_id {
-                    let maybe_note_type =
-                        if let Some(cached) = template_note_type_cache.get(&template_id) {
-                            cached.clone()
-                        } else {
-                            let loaded = db
-                                .get_custom_template_by_id(&template_id)
-                                .ok()
-                                .flatten()
-                                .and_then(|template| {
-                                    let note = template.note_type.trim().to_string();
-                                    if note.is_empty() {
-                                        None
-                                    } else {
-                                        Some(note)
-                                    }
-                                });
-                            template_note_type_cache.insert(template_id.clone(), loaded.clone());
-                            loaded
-                        };
-                    if let Some(model_name) = maybe_note_type {
-                        card_note_types.insert(card.id.clone(), model_name);
-                    }
-                }
-            }
-        }
+        // 解析每张卡的目标 note type，并（设置默认开启时）把所用应用模板作为带
+        // DeepStudent:: 前缀的带样式 note type 推送/更新到 Anki。两条同步路径共用此逻辑。
+        let card_note_types = crate::anki_connect_service::resolve_card_models_with_styling(
+            &db,
+            &cards,
+            fallback_template_id.as_deref(),
+            &requested_template_ids,
+            note_type_explicit,
+            all_cloze,
+        )
+        .await;
 
         let note_ids = match crate::anki_connect_service::add_notes_to_anki_with_card_models(
             cards.clone(),
@@ -4455,8 +4448,22 @@ fn resolve_deck_and_note_type(
     }
 
     let db = ctx.main_db.as_ref().or(ctx.anki_db.as_ref());
+    // 兼容两个历史 key（任一非空即用），优先「Anki 同步」设置里的导出牌组：
+    // 1) "Anki 同步"设置里的牌组输入框 → anki_connect_export_deck
+    // 2) 旧的默认牌组 → anki_connect_default_deck
     let deck_from_db = db
-        .and_then(|d| d.get_setting("anki_connect_default_deck").ok().flatten())
+        .and_then(|d| {
+            d.get_setting("anki_connect_export_deck")
+                .ok()
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    d.get_setting("anki_connect_default_deck")
+                        .ok()
+                        .flatten()
+                        .filter(|s| !s.trim().is_empty())
+                })
+        })
         .filter(|s| !s.trim().is_empty());
     let note_from_db = db
         .and_then(|d| d.get_setting("anki_connect_default_model").ok().flatten())
@@ -4471,6 +4478,19 @@ fn resolve_deck_and_note_type(
 struct TemplateSelection {
     template_id: Option<String>,
     template_ids: Option<Vec<String>>,
+}
+
+/// 解析用户设置的"默认模板 ID"。
+/// 兼容两个历史来源（任一非空即用），使旧设置无需迁移即可对生成/同步生效：
+/// 1) 模板管理页"设为默认" → settings.default_template_id
+/// 2) "Anki 同步"设置里的默认模板下拉 → settings.anki_connect_default_template_id
+fn resolve_user_default_template_id(db: &crate::database::Database) -> Option<String> {
+    let pick =
+        |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(id) = pick(db.get_default_template().ok().flatten()) {
+        return Some(id);
+    }
+    pick(db.get_setting("anki_connect_default_template_id").ok().flatten())
 }
 
 fn resolve_template_selection(
@@ -4488,12 +4508,18 @@ fn resolve_template_selection(
 
     match template_mode {
         ChatAnkiTemplateMode::Single => {
-            let tid = template_id
+            // 优先使用模型显式指定的模板；未指定时回退到用户设置的默认模板
+            //（"优先默认，AI 可变通"：AI 没挑模板就用用户默认，而不是报错）。
+            let tid = match template_id
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    "templateMode=single 时必须提供 templateId（指定单个模板）".to_string()
-                })?;
+            {
+                Some(v) => v,
+                None => resolve_user_default_template_id(db).ok_or_else(|| {
+                    "templateMode=single 时必须提供 templateId（或在设置中指定默认模板）"
+                        .to_string()
+                })?,
+            };
             let exists = db
                 .get_custom_template_by_id(&tid)
                 .map_err(|e| format!("加载模板失败: {}", e))?
@@ -4509,8 +4535,22 @@ fn resolve_template_selection(
         ChatAnkiTemplateMode::Multiple => {
             let ids = collect_requested_template_ids(template_id, template_ids);
             if ids.is_empty() {
+                // 兜底：模型未提供任何模板时，回退到用户设置的默认模板（按 single 处理）。
+                if let Some(default_id) = resolve_user_default_template_id(db) {
+                    let exists = db
+                        .get_custom_template_by_id(&default_id)
+                        .map_err(|e| format!("加载模板失败: {}", e))?
+                        .is_some();
+                    if exists {
+                        return Ok(TemplateSelection {
+                            template_id: Some(default_id),
+                            template_ids: None,
+                        });
+                    }
+                }
                 return Err(
-                    "templateMode=multiple 时必须提供非空 templateIds（或 templateId）".to_string(),
+                    "templateMode=multiple 时必须提供非空 templateIds（或在设置中指定默认模板）"
+                        .to_string(),
                 );
             }
             for id in &ids {

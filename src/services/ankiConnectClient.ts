@@ -18,6 +18,10 @@ export interface AnkiConnectSettings {
   anki_connect_retry_times?: number;
   anki_connect_tag_prefix?: string;
   anki_connect_media_mode?: MediaMode;
+  // 同步时把应用模板作为带样式的 DeepStudent:: note type 推送到 Anki（默认开启）
+  anki_connect_push_styled_models?: boolean;
+  // 卡片无 template_id 时兜底使用的默认模板 ID
+  anki_connect_default_template_id?: string;
 }
 
 const strToBool = (v: unknown, def = false) => {
@@ -63,7 +67,7 @@ export const ankiConnectClient = {
     });
   },
   async loadSettings(): Promise<AnkiConnectSettings> {
-    const [enabled, autoImport, defDeck, defModel, delAfter, openOnFail, exportDeck, autoCreate, batchSize, retryTimes, tagPrefix, mediaMode] = await Promise.all([
+    const [enabled, autoImport, defDeck, defModel, delAfter, openOnFail, exportDeck, autoCreate, batchSize, retryTimes, tagPrefix, mediaMode, pushStyled, defaultTemplateId] = await Promise.all([
       invoke('get_setting', { key: 'anki_connect_enabled' }).catch(() => 'false') as Promise<string>,
       invoke('get_setting', { key: 'anki_connect_auto_import_enabled' }).catch(() => 'true') as Promise<string>,
       invoke('get_setting', { key: 'anki_connect_default_deck' }).catch(() => 'Default') as Promise<string>,
@@ -76,6 +80,8 @@ export const ankiConnectClient = {
       invoke('get_setting', { key: 'anki_connect_retry_times' }).catch(() => '1') as Promise<string>,
       invoke('get_setting', { key: 'anki_connect_tag_prefix' }).catch(() => '') as Promise<string>,
       invoke('get_setting', { key: 'anki_connect_media_mode' }).catch(() => 'upload_media') as Promise<string>,
+      invoke('get_setting', { key: 'anki_connect_push_styled_models' }).catch(() => 'true') as Promise<string>,
+      invoke('get_setting', { key: 'anki_connect_default_template_id' }).catch(() => '') as Promise<string>,
     ]);
     return {
       anki_connect_enabled: strToBool(enabled, false),
@@ -90,6 +96,8 @@ export const ankiConnectClient = {
       anki_connect_retry_times: parseInt(String(retryTimes || '1'), 10) || 1,
       anki_connect_tag_prefix: getStr(tagPrefix, ''),
       anki_connect_media_mode: (getStr(mediaMode, 'upload_media') as MediaMode),
+      anki_connect_push_styled_models: strToBool(pushStyled, true),
+      anki_connect_default_template_id: getStr(defaultTemplateId, '') || undefined,
     };
   },
   async saveSettings(s: Partial<AnkiConnectSettings>): Promise<void> {
@@ -107,6 +115,8 @@ export const ankiConnectClient = {
     if (s.anki_connect_retry_times != null) push('anki_connect_retry_times', s.anki_connect_retry_times);
     if (s.anki_connect_tag_prefix != null) push('anki_connect_tag_prefix', s.anki_connect_tag_prefix);
     if (s.anki_connect_media_mode != null) push('anki_connect_media_mode', s.anki_connect_media_mode);
+    if (s.anki_connect_push_styled_models != null) push('anki_connect_push_styled_models', s.anki_connect_push_styled_models);
+    if (s.anki_connect_default_template_id != null) push('anki_connect_default_template_id', s.anki_connect_default_template_id);
     await Promise.all(pairs.map(([key, value]) => invoke('save_setting', { key, value })));
   }
 };

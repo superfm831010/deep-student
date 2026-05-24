@@ -190,7 +190,7 @@ export const chatAnkiSkill: SkillDefinition = {
           },
           templateId: {
             type: 'string',
-            description: '当 templateMode=single 时必传：单个模板 ID（来自 chatanki_list_templates）。',
+            description: 'templateMode=single 时的模板 ID（来自 chatanki_list_templates 的 id）。可省略：省略时系统会自动采用用户设置的默认模板（defaultTemplateId）。',
           },
           templateIds: {
             type: 'array',
@@ -200,7 +200,7 @@ export const chatAnkiSkill: SkillDefinition = {
           templateMode: {
             type: 'string',
             enum: ['single', 'multiple', 'all'],
-            description: '必传：模板选择模式。single=一个模板，multiple=多个模板，all=全部启用模板。',
+            description: '必传：模板选择模式。single=一个模板，multiple=多个模板，all=全部启用模板。默认策略：若用户未明确指定卡片风格/模板，优先用 single 并采用用户的默认模板（见 chatanki_list_templates 返回的 defaultTemplateId 及各模板的 isDefault；此时 templateId 可省略，系统会自动套用默认模板）。仅当用户明确要求某种风格、或明确要求生成多种风格时，才改用其他 templateId 或 multiple/all。',
           },
           maxCards: {
             type: 'integer',
@@ -218,13 +218,13 @@ export const chatAnkiSkill: SkillDefinition = {
       inputSchema: {
         type: 'object',
         properties: {
-          goal: { type: 'string', description: '学习目标（会影响拆卡粒度/卡片风格）' },
+          goal: { type: 'string', description: '可选但强烈建议：学习目标（会影响拆卡粒度/卡片风格）' },
           content: { type: 'string', description: '必需：要制卡的文本/Markdown' },
           deckName: { type: 'string', description: '可选：默认牌组名称' },
           noteType: { type: 'string', description: '可选：默认笔记类型' },
           templateId: {
             type: 'string',
-            description: '当 templateMode=single 时必传：单个模板 ID（来自 chatanki_list_templates）。',
+            description: 'templateMode=single 时的模板 ID（来自 chatanki_list_templates 的 id）。可省略：省略时系统会自动采用用户设置的默认模板（defaultTemplateId）。',
           },
           templateIds: {
             type: 'array',
@@ -234,7 +234,7 @@ export const chatAnkiSkill: SkillDefinition = {
           templateMode: {
             type: 'string',
             enum: ['single', 'multiple', 'all'],
-            description: '必传：模板选择模式。single=一个模板，multiple=多个模板，all=全部启用模板。',
+            description: '必传：模板选择模式。single=一个模板，multiple=多个模板，all=全部启用模板。默认策略：若用户未明确指定卡片风格/模板，优先用 single 并采用用户的默认模板（见 chatanki_list_templates 返回的 defaultTemplateId 及各模板的 isDefault；此时 templateId 可省略，系统会自动套用默认模板）。仅当用户明确要求某种风格、或明确要求生成多种风格时，才改用其他 templateId 或 multiple/all。',
           },
           maxCards: {
             type: 'integer',
@@ -242,7 +242,7 @@ export const chatAnkiSkill: SkillDefinition = {
           },
           debug: { type: 'boolean', description: '可选：输出更多调试信息' },
         },
-        required: ['goal', 'content', 'maxCards', 'templateMode'],
+        required: ['content', 'maxCards', 'templateMode'],
       },
     },
     {

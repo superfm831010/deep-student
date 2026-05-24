@@ -1,4 +1,4 @@
-use crate::models::AnkiCard;
+use crate::models::{AnkiCard, CustomAnkiTemplate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::TcpStream;
@@ -447,6 +447,101 @@ pub async fn get_model_field_names(model_name: &str) -> Result<Vec<String>, Stri
     }
 }
 
+/// 当卡片引用的笔记类型在用户的 Anki 中不存在时（例如默认 "Basic" 在中文版
+/// Anki 里实际叫「基础」），挑选一个已存在的合理模型作为回退，避免 addNotes
+/// 直接以 "model was not found" 失败。返回 None 表示无可用模型（调用方保留原名）。
+/// 判断一个模型是否为「填空（Cloze）」类。仅靠模型名不够（中文 Anki 叫「填空题」），
+/// 还会看首字段是否为经典的 Text/文字。
+fn model_looks_cloze(name: &str, fields: &[String]) -> bool {
+    let l = name.to_lowercase();
+    if l.contains("cloze") || name.contains("填空") {
+        return true;
+    }
+    fields
+        .first()
+        .map(|f| f.eq_ignore_ascii_case("text") || f == "文字")
+        .unwrap_or(false)
+}
+
+/// 字段名是否像「正面/问题」侧。
+fn field_looks_front(f: &str) -> bool {
+    let l = f.to_lowercase();
+    l == "front" || f.contains("正面") || f.contains("前面") || l.contains("question")
+}
+
+/// 字段名是否像「背面/答案」侧（排除「背面额外」这类附加字段）。
+fn field_looks_back(f: &str) -> bool {
+    let l = f.to_lowercase();
+    l == "back"
+        || f.contains("后面")
+        || l.contains("answer")
+        || (f.contains("背面") && !f.contains("额外"))
+}
+
+/// 给候选回退模型打分：分数越高越适合。
+/// - 需要 cloze 时只接受 cloze 模型；
+/// - 需要普通正反面卡时，偏好「有正反面语义且字段数为 2」的模型，
+///   并对字段数多的（如图片遮盖类「遮盖/图片/标题/...」）扣分以避开。
+fn score_fallback_model(name: &str, fields: &[String], want_cloze: bool) -> i32 {
+    let is_cloze = model_looks_cloze(name, fields);
+    if want_cloze {
+        return if is_cloze {
+            100 - fields.len() as i32
+        } else {
+            -1000
+        };
+    }
+    if is_cloze {
+        return -500; // 普通卡尽量不要落到填空模型
+    }
+    let has_front = fields.iter().any(|f| field_looks_front(f));
+    let has_back = fields.iter().any(|f| field_looks_back(f));
+    let mut s = 0;
+    if has_front {
+        s += 60;
+    }
+    if has_back {
+        s += 40;
+    }
+    if fields.len() == 2 {
+        s += 50;
+    }
+    s -= fields.len() as i32;
+    s
+}
+
+/// 当卡片引用的笔记类型在用户的 Anki 中不存在时（例如默认 "Basic" 在中文版
+/// Anki 里实际叫「问答题」，而「基础」可能被插件改成图片遮盖类型），按**字段结构**
+/// 而非名字挑选一个最合适的已存在模型作为回退，避免 addNotes 以 model not found
+/// 或 empty note 失败。返回 None 表示无可用模型（调用方保留原名）。
+fn pick_fallback_model(
+    requested: &str,
+    available: &[String],
+    field_map: &HashMap<String, Vec<String>>,
+    want_cloze: bool,
+) -> Option<String> {
+    if available.is_empty() {
+        return None;
+    }
+    let req_lower = requested.to_lowercase();
+    // 1. 精确匹配（大小写不敏感），返回 Anki 中的规范名。
+    if let Some(m) = available.iter().find(|m| m.to_lowercase() == req_lower) {
+        return Some(m.clone());
+    }
+    // 2. 按字段结构打分，挑最合适的。
+    let empty: Vec<String> = Vec::new();
+    let mut best: Option<(String, i32)> = None;
+    for m in available {
+        let fields = field_map.get(m).unwrap_or(&empty);
+        let score = score_fallback_model(m, fields, want_cloze);
+        match &best {
+            Some((_, bs)) if *bs >= score => {}
+            _ => best = Some((m.clone(), score)),
+        }
+    }
+    best.map(|(m, _)| m)
+}
+
 /// 将AnkiCard列表添加到Anki
 pub async fn add_notes_to_anki(
     cards: Vec<AnkiCard>,
@@ -466,7 +561,9 @@ pub async fn add_notes_to_anki_with_card_models(
     check_anki_connect_availability().await?;
 
     let mut model_field_names_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
-    let mut model_names: Vec<String> = cards
+
+    // 卡片引用的所有笔记类型（去重）。
+    let mut requested_models: Vec<String> = cards
         .iter()
         .map(|card| {
             card_models
@@ -475,16 +572,78 @@ pub async fn add_notes_to_anki_with_card_models(
                 .unwrap_or_else(|| note_type.clone())
         })
         .collect();
-    model_names.sort();
-    model_names.dedup();
+    requested_models.sort();
+    requested_models.dedup();
 
-    for model_name in model_names {
-        let loaded = match get_model_field_names(&model_name).await {
-            Ok(names) if !names.is_empty() => Some(names),
-            Ok(_) => None,
-            Err(e) => {
-                println!("⚠️ 获取模型字段失败: {} — 将使用基本字段映射", e);
+    // best-effort 获取 Anki 中实际存在的笔记类型；对不存在的请求名建立回退映射，
+    // 避免诸如默认 "Basic" 在中文版 Anki（实际叫「基础」）上以 model was not found 失败。
+    // 取列表失败时返回空 → 跳过 remap，保持原有行为，瞬时故障不阻断同步。
+    let available_models = get_model_names().await.unwrap_or_default();
+
+    // 是否有请求的模型在 Anki 中不存在、需要回退。
+    let needs_fallback = !available_models.is_empty()
+        && requested_models
+            .iter()
+            .any(|r| !available_models.iter().any(|m| m == r));
+
+    // 需要回退时，预取所有可用模型的字段，按字段结构挑选最合适的回退模型；
+    // 这份字段表随后复用给字段映射阶段，避免重复请求。
+    let mut available_fields: HashMap<String, Vec<String>> = HashMap::new();
+    if needs_fallback {
+        for m in &available_models {
+            let fields = get_model_field_names(m).await.unwrap_or_default();
+            available_fields.insert(m.clone(), fields);
+        }
+    }
+
+    let mut model_remap: HashMap<String, String> = HashMap::new();
+    if needs_fallback {
+        for requested in &requested_models {
+            if available_models.iter().any(|m| m == requested) {
+                continue;
+            }
+            let want_cloze = model_looks_cloze(requested, &[]);
+            if let Some(fallback) =
+                pick_fallback_model(requested, &available_models, &available_fields, want_cloze)
+            {
+                if &fallback != requested {
+                    println!(
+                        "⚠️ Anki 中不存在笔记类型 \"{}\"，按字段结构回退到 \"{}\"",
+                        requested, fallback
+                    );
+                    model_remap.insert(requested.clone(), fallback);
+                }
+            }
+        }
+    }
+    let resolve_model = |requested: &str| -> String {
+        model_remap
+            .get(requested)
+            .cloned()
+            .unwrap_or_else(|| requested.to_string())
+    };
+
+    // 用 remap 后的最终模型名拉取字段（去重）；可用模型的字段优先复用上面预取的结果。
+    let mut effective_models: Vec<String> =
+        requested_models.iter().map(|m| resolve_model(m)).collect();
+    effective_models.sort();
+    effective_models.dedup();
+
+    for model_name in effective_models {
+        let loaded = if let Some(fields) = available_fields.get(&model_name) {
+            if fields.is_empty() {
                 None
+            } else {
+                Some(fields.clone())
+            }
+        } else {
+            match get_model_field_names(&model_name).await {
+                Ok(names) if !names.is_empty() => Some(names),
+                Ok(_) => None,
+                Err(e) => {
+                    println!("⚠️ 获取模型字段失败: {} — 将使用基本字段映射", e);
+                    None
+                }
             }
         };
         model_field_names_cache.insert(model_name, loaded);
@@ -494,10 +653,11 @@ pub async fn add_notes_to_anki_with_card_models(
     let notes: Vec<Note> = cards
         .into_iter()
         .map(|card| {
-            let model_name = card_models
+            let requested = card_models
                 .get(&card.id)
                 .cloned()
                 .unwrap_or_else(|| note_type.clone());
+            let model_name = resolve_model(&requested);
 
             let model_field_names = model_field_names_cache
                 .get(&model_name)
@@ -607,6 +767,209 @@ pub async fn create_deck_if_not_exists(deck_name: &str) -> Result<(), String> {
         }
         Err(e) => Err(format!("创建牌组失败: {}", e)),
     }
+}
+
+/// 通用 AnkiConnect 请求封装：发送 action + params，返回 result（错误统一带 action 名）。
+async fn anki_post(
+    action: &str,
+    params: serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    let request = AnkiConnectRequest {
+        action: action.to_string(),
+        version: 6,
+        params: Some(params),
+    };
+    let client = reqwest::Client::new();
+    let response = client
+        .post(ANKI_CONNECT_URL)
+        .json(&request)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("AnkiConnect 请求失败({}): {}", action, e))?;
+    if !response.status().is_success() {
+        return Err(format!("AnkiConnect HTTP错误({}): {}", action, response.status()));
+    }
+    let parsed: AnkiConnectResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("解析AnkiConnect响应失败({}): {}", action, e))?;
+    if let Some(error) = parsed.error {
+        return Err(format!("AnkiConnect错误({}): {}", action, error));
+    }
+    Ok(parsed.result)
+}
+
+/// 用应用模板在 Anki 中创建一个带样式的 note type（含字段 / 正背面模板 / CSS）。
+/// 卡片模板固定命名 "Card 1"，与 update_styled_model 保持一致。
+pub async fn create_model_from_template(
+    model_name: &str,
+    fields: &[String],
+    front_qfmt: &str,
+    back_afmt: &str,
+    css: &str,
+    is_cloze: bool,
+) -> Result<(), String> {
+    let params = serde_json::json!({
+        "modelName": model_name,
+        "inOrderFields": fields,
+        "css": css,
+        "isCloze": is_cloze,
+        "cardTemplates": [
+            { "Name": "Card 1", "Front": front_qfmt, "Back": back_afmt }
+        ]
+    });
+    anki_post("createModel", params).await.map(|_| ())
+}
+
+/// 覆盖更新已存在 note type 的正背面模板与 CSS（不改字段）。
+pub async fn update_styled_model(
+    model_name: &str,
+    front_qfmt: &str,
+    back_afmt: &str,
+    css: &str,
+) -> Result<(), String> {
+    let tmpl_params = serde_json::json!({
+        "model": {
+            "name": model_name,
+            "templates": { "Card 1": { "Front": front_qfmt, "Back": back_afmt } }
+        }
+    });
+    anki_post("updateModelTemplates", tmpl_params).await?;
+    let css_params = serde_json::json!({
+        "model": { "name": model_name, "css": css }
+    });
+    anki_post("updateModelStyling", css_params).await?;
+    Ok(())
+}
+
+/// 确保带样式模型存在并为最新：已存在则覆盖更新模板/CSS，否则新建。
+pub async fn ensure_styled_model(
+    model_name: &str,
+    fields: &[String],
+    front_qfmt: &str,
+    back_afmt: &str,
+    css: &str,
+    is_cloze: bool,
+    available_models: &[String],
+) -> Result<(), String> {
+    if available_models.iter().any(|m| m == model_name) {
+        update_styled_model(model_name, front_qfmt, back_afmt, css).await
+    } else {
+        create_model_from_template(model_name, fields, front_qfmt, back_afmt, css, is_cloze).await
+    }
+}
+
+/// 为一批卡片解析「目标 note type 名」，并在开启样式推送时把所用应用模板
+/// 作为带 `DeepStudent::` 前缀的带样式 note type 推送/更新到 Anki。
+/// 返回 card_id -> 目标 model 名 的映射，供 add_notes_to_anki_with_card_models 使用。
+/// 两条同步路径（chatanki_sync 工具 / add_cards_to_anki_connect 命令）共用此逻辑。
+pub async fn resolve_card_models_with_styling(
+    db: &crate::database::Database,
+    cards: &[AnkiCard],
+    explicit_template_id: Option<&str>,
+    requested_template_ids: &[String],
+    note_type_explicit: bool,
+    all_cloze: bool,
+) -> HashMap<String, String> {
+    let mut card_models: HashMap<String, String> = HashMap::new();
+
+    // 设置：默认开启样式推送；可在 Anki 设置里关闭或选择默认兜底模板。
+    let push_styled = db
+        .get_setting("anki_connect_push_styled_models")
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_lowercase() != "false")
+        .unwrap_or(true);
+    let default_tid = db
+        .get_setting("anki_connect_default_template_id")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+    // 兜底：首个启用中的模板。
+    let first_active_tid: Option<String> = db
+        .get_all_custom_templates()
+        .ok()
+        .and_then(|ts| ts.into_iter().find(|t| t.is_active).map(|t| t.id));
+
+    let mut template_cache: HashMap<String, Option<CustomAnkiTemplate>> = HashMap::new();
+    let mut styled_models: HashMap<String, CustomAnkiTemplate> = HashMap::new();
+
+    for card in cards {
+        if card.id.trim().is_empty() {
+            continue;
+        }
+        let tid = card
+            .template_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| explicit_template_id.map(String::from))
+            .or_else(|| requested_template_ids.first().cloned())
+            .or_else(|| default_tid.clone())
+            .or_else(|| first_active_tid.clone());
+        let Some(tid) = tid else { continue };
+
+        let template = if let Some(cached) = template_cache.get(&tid) {
+            cached.clone()
+        } else {
+            let loaded = db.get_custom_template_by_id(&tid).ok().flatten();
+            template_cache.insert(tid.clone(), loaded.clone());
+            loaded
+        };
+        let Some(template) = template else { continue };
+
+        if push_styled && !note_type_explicit {
+            let model_name = format!("DeepStudent::{}", template.name);
+            card_models.insert(card.id.clone(), model_name.clone());
+            styled_models.entry(model_name).or_insert(template);
+        } else if !note_type_explicit && !all_cloze {
+            // 不推送样式时沿用模板的 note_type（与原有行为一致）；
+            // 全 cloze 或用户显式指定 note_type 时留空，交由调用方的全局 note_type 决定。
+            let nt = template.note_type.trim();
+            if !nt.is_empty() {
+                card_models.insert(card.id.clone(), nt.to_string());
+            }
+        }
+    }
+
+    // 推送带样式模型；失败则把用到该模型的卡回退到模板原 note_type。
+    if push_styled && !note_type_explicit && !styled_models.is_empty() {
+        let available = get_model_names().await.unwrap_or_default();
+        for (model_name, template) in &styled_models {
+            let is_cloze = {
+                let l = template.note_type.to_lowercase();
+                l.contains("cloze") || template.note_type.contains("填空")
+            };
+            if let Err(e) = ensure_styled_model(
+                model_name,
+                &template.fields,
+                &template.front_template,
+                &template.back_template,
+                &template.css_style,
+                is_cloze,
+                &available,
+            )
+            .await
+            {
+                let fallback_nt = template.note_type.trim().to_string();
+                println!(
+                    "⚠️ 推送带样式模型失败 {}：{} — 用到该模型的卡回退到 \"{}\"",
+                    model_name, e, fallback_nt
+                );
+                if !fallback_nt.is_empty() {
+                    for m in card_models.values_mut() {
+                        if m == model_name {
+                            *m = fallback_nt.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    card_models
 }
 
 /// 通过 AnkiConnect 导入 APKG 包

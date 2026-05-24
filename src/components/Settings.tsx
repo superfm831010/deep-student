@@ -36,6 +36,7 @@ import '../command-palette/styles/shortcut-settings.css';
 import { AppMenuDemo } from './ui/app-menu';
 import { McpToolsSection } from './settings/McpToolsSection';
 import { ModelsTab } from './settings/ModelsTab';
+import { AnkiConnectSettingsSection } from './settings/AnkiConnectSettingsSection';
 import { AboutTab } from './settings/AboutTab';
 import { AppTab } from './settings/AppTab';
 import { ApisTab } from './settings/ApisTab';
@@ -177,6 +178,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       // UI 文案已统一为“模型服务”，内部 tab id 仍保持 apis 以最小化改动面
       'apis': t('settings:tabs.api_config'),
       'models': t('settings:tabs.model_assignment'),
+      'anki': t('settings:tabs.anki'),
       'mcp': t('settings:tabs.mcp_tools'),
       'search': t('settings:tabs.external_search'),
       'statistics': t('settings:tabs.statistics'),
@@ -699,6 +701,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       // 模型相关：放在一起（用户期望“模型服务”和“模型分配”相邻）
       { value: 'apis', icon: Bot, label: t('settings:tabs.api_config'), tourId: 'settings-tab-apis' },
       { value: 'models', icon: FlaskConical, label: t('settings:tabs.model_assignment'), tourId: 'settings-tab-models' },
+      { value: 'anki', icon: Layers, label: t('settings:tabs.anki') },
     ],
     [
       { value: 'app', icon: Palette, label: t('settings:tabs.app') },
@@ -1128,6 +1131,9 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             getRerankerApis={getRerankerApis}
             saveSingleAssignmentField={saveSingleAssignmentField}
           />
+        )}
+        {activeTab === 'anki' && (
+          <AnkiConnectSettingsSection />
         )}
         {activeTab === 'mcp' && (
           <McpToolsSection

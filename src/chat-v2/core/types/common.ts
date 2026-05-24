@@ -184,7 +184,7 @@ export function createDefaultChatParams(): ChatParams {
     frequencyPenalty: 0,
     presencePenalty: 0,
     maxTokens: 32768,
-    enableThinking: true,
+    enableThinking: false,
     disableTools: false,
     model2OverrideId: null,
     maxToolRecursion: 30,

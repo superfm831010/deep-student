@@ -276,6 +276,135 @@ mod tests {
         assert_eq!(converted.args_json, json!({}));
     }
 
+    fn deepseek_thinking_config() -> ApiConfig {
+        ApiConfig {
+            provider_type: Some("deepseek".to_string()),
+            model: "deepseek-v4-pro".to_string(),
+            model_adapter: "deepseek".to_string(),
+            supports_reasoning: true,
+            thinking_enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ensure_deepseek_reasoning_content_fills_missing_field() {
+        let config = deepseek_thinking_config();
+        let mut body = json!({
+            "model": "deepseek-v4-pro",
+            "thinking": { "type": "enabled" },
+            "messages": [
+                { "role": "system", "content": "sys" },
+                { "role": "user", "content": "hi" },
+                // 缺 reasoning_content（如工具调用后的轮次） → 应补空串
+                { "role": "assistant", "content": "", "tool_calls": [] },
+                { "role": "tool", "tool_call_id": "c1", "content": "result" },
+                // 已有真实思维内容 → 不应被覆盖
+                { "role": "assistant", "content": "answer", "reasoning_content": "real thinking" },
+            ]
+        });
+
+        LLMManager::ensure_deepseek_reasoning_content(&mut body, &config);
+
+        let msgs = body["messages"].as_array().unwrap();
+        // system / user / tool 不受影响
+        assert!(msgs[0].get("reasoning_content").is_none());
+        assert!(msgs[1].get("reasoning_content").is_none());
+        assert!(msgs[3].get("reasoning_content").is_none());
+        // 缺字段的 assistant 被补空串
+        assert_eq!(msgs[2].get("reasoning_content"), Some(&json!("")));
+        // 已有真实内容不被覆盖
+        assert_eq!(msgs[4].get("reasoning_content"), Some(&json!("real thinking")));
+    }
+
+    #[test]
+    fn ensure_deepseek_reasoning_content_respects_reasoning_details() {
+        let config = deepseek_thinking_config();
+        let mut body = json!({
+            "thinking": { "type": "enabled" },
+            "messages": [
+                { "role": "assistant", "content": "a", "reasoning_details": [{ "type": "thinking", "text": "x" }] },
+            ]
+        });
+
+        LLMManager::ensure_deepseek_reasoning_content(&mut body, &config);
+
+        // 使用 reasoning_details 的消息不应被追加 reasoning_content
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn ensure_deepseek_reasoning_content_injects_when_no_thinking_field_v4_default_on() {
+        // DeepSeek V4 默认开启 thinking：即使配置未勾选推理、请求体无 thinking 字段，
+        // 也必须为 assistant 消息补 reasoning_content（否则工具轮 400）。
+        let mut config = deepseek_thinking_config();
+        config.supports_reasoning = false;
+        let mut body = json!({
+            "messages": [ { "role": "assistant", "content": "", "tool_calls": [] } ]
+        });
+
+        LLMManager::ensure_deepseek_reasoning_content(&mut body, &config);
+
+        assert_eq!(
+            body["messages"][0].get("reasoning_content"),
+            Some(&json!(""))
+        );
+    }
+
+    #[test]
+    fn ensure_deepseek_reasoning_content_noop_when_thinking_explicitly_disabled() {
+        let config = deepseek_thinking_config();
+        // 显式关闭 thinking → 不需要也不注入
+        let mut body = json!({
+            "thinking": { "type": "disabled" },
+            "messages": [ { "role": "assistant", "content": "", "tool_calls": [] } ]
+        });
+
+        LLMManager::ensure_deepseek_reasoning_content(&mut body, &config);
+
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn ensure_deepseek_reasoning_content_noop_for_non_deepseek() {
+        let config = ApiConfig {
+            provider_type: Some("openai".to_string()),
+            model: "gpt-4o".to_string(),
+            model_adapter: "openai".to_string(),
+            ..Default::default()
+        };
+        let mut body = json!({
+            "thinking": { "type": "enabled" },
+            "messages": [ { "role": "assistant", "content": "" } ]
+        });
+
+        LLMManager::ensure_deepseek_reasoning_content(&mut body, &config);
+
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn ensure_deepseek_reasoning_content_handles_siliconflow_enable_thinking() {
+        let config = ApiConfig {
+            provider_type: Some("siliconflow".to_string()),
+            model: "deepseek-ai/DeepSeek-V3.2".to_string(),
+            model_adapter: "deepseek".to_string(),
+            supports_reasoning: true,
+            ..Default::default()
+        };
+        let mut body = json!({
+            "enable_thinking": true,
+            "messages": [ { "role": "assistant", "content": "" } ]
+        });
+
+        LLMManager::ensure_deepseek_reasoning_content(&mut body, &config);
+
+        assert_eq!(
+            body["messages"][0].get("reasoning_content"),
+            Some(&json!(""))
+        );
+    }
+
     #[test]
     fn registry_inference_matches_siliconflow_glm_46v() {
         let inferred = LLMManager::infer_capability_overrides_from_registry(
@@ -1430,6 +1559,65 @@ impl LLMManager {
 
         // 应用通用参数
         adapter.apply_common_params(map, config);
+    }
+
+    /// DeepSeek thinking 模式要求：多轮对话中携带 `tool_calls` 的 `assistant` 消息必须
+    /// 携带 `reasoning_content` 字段（空字符串也可），否则返回 HTTP 400
+    /// 「reasoning_content in the thinking mode must be passed back to the API」。
+    ///
+    /// ## 关键事实（已用真实 API 验证，2026-05）
+    /// - **DeepSeek V4（deepseek-v4-flash/pro）默认开启 thinking**：即使请求体里完全没有
+    ///   `thinking` 参数，服务端仍处于 thinking 模式，工具调用轮缺 `reasoning_content` 即 400。
+    /// - 只有显式 `thinking:{type:"disabled"}`（或 `enable_thinking:false`）才解除该要求。
+    /// - `reasoning_content:""`（空串）在 thinking 开/关下都被接受，是安全的兜底值。
+    ///
+    /// 因此本函数的门控不能依赖"请求体里出现了 thinking 字段"，而是：只要是 DeepSeek 模型、
+    /// 且未显式关闭 thinking，就为缺失 `reasoning_content`（且未用 `reasoning_details`）的
+    /// assistant 消息补空串。在 `request_body` 构建完成且 `apply_reasoning_config` 之后调用，
+    /// 幂等，不覆盖已有真实思维内容。
+    fn ensure_deepseek_reasoning_content(request_body: &mut Value, config: &ApiConfig) {
+        // 仅 DeepSeek 系列（按适配器 / provider / 模型名识别）
+        let is_deepseek = config.model_adapter.eq_ignore_ascii_case("deepseek")
+            || config
+                .provider_type
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case("deepseek"))
+                .unwrap_or(false)
+            || config.model.to_lowercase().contains("deepseek");
+        if !is_deepseek {
+            return;
+        }
+
+        // 仅当 thinking 被「显式关闭」时跳过；其余情况（含 V4 默认开启、未传 thinking 参数）
+        // 都补齐 reasoning_content。空串在两种模式下均被接受，故此判断只是避免无谓改动。
+        let thinking_type = request_body
+            .get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(|v| v.as_str());
+        let enable_thinking = request_body.get("enable_thinking").and_then(|v| v.as_bool());
+        let thinking_explicitly_disabled =
+            thinking_type == Some("disabled") || enable_thinking == Some(false);
+        if thinking_explicitly_disabled {
+            return;
+        }
+
+        if let Some(messages) = request_body
+            .get_mut("messages")
+            .and_then(|m| m.as_array_mut())
+        {
+            for msg in messages.iter_mut() {
+                if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                    continue;
+                }
+                if let Some(obj) = msg.as_object_mut() {
+                    if !obj.contains_key("reasoning_content")
+                        && !obj.contains_key("reasoning_details")
+                    {
+                        obj.insert("reasoning_content".to_string(), json!(""));
+                    }
+                }
+            }
+        }
     }
 
     // -------- Streaming Hooks (for unified pipeline) --------

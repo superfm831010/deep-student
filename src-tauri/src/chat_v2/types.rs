@@ -2284,9 +2284,9 @@ impl Default for ChatParams {
             frequency_penalty: Some(0.0),
             presence_penalty: Some(0.0),
             context_limit: Some(8192),
-            // 🔧 2026-02-07: 对齐前端默认值 (32768 / enableThinking=true)
+            // 🔧 2026-02-07: 对齐前端默认值 (32768 / enableThinking=false)
             max_tokens: Some(32768),
-            enable_thinking: Some(true),
+            enable_thinking: Some(false),
             disable_tools: Some(false),
             model2_override_id: None,
             rag_top_k: None,
